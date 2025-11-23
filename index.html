@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GOLD PRO V8 - 8 Indicators + FVG</title>
+    <style>
+        body {font-family: Arial, sans-serif;background:#000;color:#0f0;padding:20px;}
+        h1 {color:#FFD700;text-align:center;text-shadow:0 0 20px #FFD700;}
+        input{width:100%;padding:12px;margin:8px 0;border-radius:8px;background:#222;color:#fff;border:none;}
+        button{background:#FFD700;color:#000;padding:12px 25px;border:none;border-radius:50px;font-weight:bold;cursor:pointer;margin:5px;}
+        button:hover{background:#ffed4e;}
+        #status{background:#333;padding:15px;border-radius:10px;margin:15px 0;text-align:center;font-size:1.1rem;}
+        #logs{background:#111;color:#0f0;padding:15px;height:300px;overflow-y:scroll;border-radius:10px;font-family:monospace;}
+        .signal{background:#006400;color:#fff;padding:20px;border-radius:15px;margin:20px 0;display:none;box-shadow:0 0 30px #0f0;animation:glow 2s infinite;}
+        .sell-signal{background:#8B0000;box-shadow:0 0 30px #f00;}
+        @keyframes glow{0%,100%{opacity:0.8;}50%{opacity:1;}}
+    </style>
+</head>
+<body>
+    <h1>GOLD PRO V8</h1>
+    <p style="text-align:center;color:#aaa;">8 Indicators • FVG • 6/8 Confirmation • 5 Min Cooldown</p>
+
+    <input type="password" id="twelvekey" placeholder="Twelve Data API Key">
+    <input type="password" id="token" placeholder="Telegram Bot Token">
+    <input type="text" id="chatids" placeholder="Chat IDs (12345,-10012345)">
+
+    <div style="text-align:center;">
+        <button onclick="startBot()">START BOT</button>
+        <button onclick="stopBot()" style="background:#f44;">STOP BOT</button>
+    </div>
+
+    <div id="status">Status: Stopped</div>
+    <div id="logs">Bot ready. Enter keys & start.</div>
+    <div id="signal" class="signal"></div>
+
+<script>
+    const SYMBOL = "XAUUSD";  // Tere key ke saath perfect chal raha hai
+    const SCAN_INTERVAL = 60 * 1000;
+    const COOLDOWN = 5 * 60 * 1000;  // 5 min
+    let lastSignal = 0, intervalId = null;
+
+    function log(msg){ 
+        const l = document.getElementById('logs');
+        l.innerHTML += new Date().toLocaleTimeString() + ': ' + msg + '<br>';
+        l.scrollTop = l.scrollHeight;
+    }
+
+    async function sendTelegram(msg){
+        const token = document.getElementById('token').value.trim();
+        const ids = document.getElementById('chatids').value.split(',').map(x=>x.trim());
+        for(let id of ids){
+            if(!id) continue;
+            await fetch(`https://api.telegram.org/bot\( {token}/sendMessage?chat_id= \){id}&text=${encodeURIComponent(msg)}&parse_mode=Markdown`);
+        }
+    }
+
+    async function getCandles(){
+        const key = document.getElementById('twelvekey').value.trim();
+        const url = `https://api.twelvedata.com/time_series?symbol=\( {SYMBOL}&interval=1min&outputsize=300&apikey= \){key}`;
+        const r = await fetch(url);
+        const d = await r.json();
+        if(d.values) {
+            return d.values.reverse().map(c=>({
+                o:+c.open, h:+c.high, l:+c.low, c:+c.close, v:+(c.volume||0)||((c.high-c.low)*10000)
+            }));
+        }
+        return [];
+    }
+
+    // Indicators
+    function calcRSI(p, n=14){let g=0,l=0;for(let i=p.length-n;i<p.length;i++){let d=p[i]-p[i-1];d>0?g+=d:l-=d;}return 100-(100/(1+g/Math.abs(l||1)));}
+    function calcEMA(p,n){let k=2/(n+1),e=p[0];for(let i=1;i<p.length;i++)e=p[i]*k+e*(1-k);return e;}
+    function calcBB(p,n=20,m=2){let s=p.slice(-n).reduce((a,b)=>a+b,0)/n; let v=p.slice(-n).reduce((a,b)=>a+Math.pow(b-s,2),0)/n; let d=Math.sqrt(v); return {u:s+m*d, l:s-m*d};}
+    function calcStoch(h,l,c,n=14){let hh=Math.max(...h.slice(-n)), ll=Math.min(...l.slice(-n)); return ((c[c.length-1]-ll)/(hh-ll||1))*100;}
+    function detectFVG(candles){if(candles.length<3)return"none";const a=candles[candles.length-3], x=candles[candles.length-1]; return a.h < x.l ? "bull" : a.l > x.h ? "bear" : "none";}
+
+    async function scan(){
+        const candles = await getCandles();
+        if(candles.length < 100){ log("Data load nahi hua"); return; }
+
+        const c = candles.map(x=>x.c), h=candles.map(x=>x.h), l=candles.map(x=>x.l), v=candles.map(x=>x.v);
+        const price = c[c.length-1].toFixed(2);
+
+        let buy=0, sell=0, reasonsBuy=[], reasonsSell=[];
+
+        // 1. RSI
+        const rsi = calcRSI(c,14); rsi<32 && (buy++, reasonsBuy.push(`RSI \( {rsi.toFixed(1)}`)); rsi>68 && (sell++, reasonsSell.push(`RSI \){rsi.toFixed(1)}`));
+
+        // 2. MACD
+        const ema12=calcEMA(c,12), ema26=calcEMA(c,26); ema12>ema26 && (buy++, reasonsBuy.push("MACD Bull")); ema12<ema26 && (sell++, reasonsSell.push("MACD Bear"));
+
+        // 3. Bollinger Bands
+        const bb = calcBB(c); c[c.length-1]>bb.u && (buy++, reasonsBuy.push("BB Breakout")); c[c.length-1]<bb.l && (sell++, reasonsSell.push("BB Breakdown"));
+
+        // 4. Stochastic
+        const stoch = calcStoch(h,l,c,14); stoch<25 && (buy++, reasonsBuy.push(`Stoch \( {stoch.toFixed(1)}`)); stoch>75 && (sell++, reasonsSell.push(`Stoch \){stoch.toFixed(1)}`));
+
+        // 5. EMA 50/200
+        const ema50=calcEMA(c,50), ema200=calcEMA(c,200); ema50>ema200 && (buy++, reasonsBuy.push("Golden Cross")); ema50<ema200 && (sell++, reasonsSell.push("Death Cross"));
+
+        // 6. Trend Confirmation
+        c[c.length-1]>ema50 && ema50>ema200 && (buy++, reasonsBuy.push("Trend Up")); c[c.length-1]<ema50 && ema50<ema200 && (sell++, reasonsSell.push("Trend Down"));
+
+        // 7. Volume Spike
+        const avgVol = v.slice(-20).reduce((a,b)=>a+b,0)/20; v[v.length-1]>avgVol*2 && (c[c.length-1]>c[c.length-2]? (buy++, reasonsBuy.push("Volume+")) : (sell++, reasonsSell.push("Volume-")));
+
+        // 8. FVG
+        const fvg = detectFVG(candles); fvg==="bull" && (buy++, reasonsBuy.push("FVG Bull")); fvg==="bear" && (sell++, reasonsSell.push("FVG Bear"));
+
+        log(`Price: \[ {price} | BUY: \( {buy}/8 | SELL: \){sell}/8 | FVG: ${fvg.toUpperCase()}`);
+
+        const now = Date.now();
+        const sig = document.getElementById("signal");
+
+        if(buy>=6 && now-lastSignal>COOLDOWN){
+            const tp = (parseFloat(price)+50).toFixed(2), sl = (parseFloat(price)-25).toFixed(2);
+            const msg = `*GOLD PRO V8 - BUY SIGNAL*\nEntry: \]{price}\nTP: \[ {tp} (+50)\nSL: \]{sl} (-25)\nRR: 1:2\nScore: \( {buy}/8 🔥\n \){reasonsBuy.join(" • ")}`;
+            sendTelegram(msg);
+            sig.innerHTML = `<b>BUY SIGNAL SENT! (\( {buy}/8)</b><br> \){reasonsBuy.join(" • ")}`;
+            sig.className = "signal"; sig.style.display="block";
+            lastSignal = now;
+            log("BUY SIGNAL SENT!");
+        }
+        else if(sell>=6 && now-lastSignal>COOLDOWN){
+            const tp = (parseFloat(price)-50).toFixed(2), sl = (parseFloat(price)+25).toFixed(2);
+            const msg = `*GOLD PRO V8 - SELL SIGNAL*\nEntry: \[ {price}\nTP: \]{tp} (-50)\nSL: $${sl} (+25)\nRR: 1:2\nScore: \( {sell}/8 ❄️\n \){reasonsSell.join(" • ")}`;
+            sendTelegram(msg);
+            sig.innerHTML = `<b>SELL SIGNAL SENT! (\( {sell}/8)</b><br> \){reasonsSell.join(" • ")}`;
+            sig.className = "signal sell-signal"; sig.style.display="block";
+            lastSignal = now;
+            log("SELL SIGNAL SENT!");
+        }
+    }
+
+    function startBot(){
+        if(document.getElementById('twelvekey').value.trim() && document.getElementById('token').value.trim()){
+            document.getElementById('status').textContent="Status: GOLD PRO V8 Running – 8 Indicators Active";
+            document.getElementById('status').style.background="#006400";
+            scan(); intervalId=setInterval(scan, SCAN_INTERVAL);
+            log("GOLD PRO V8 Started – Waiting for 6/8 confirmation...");
+        }else alert("API Key aur Telegram Token daal pehle bhai!");
+    }
+
+    function stopBot(){
+        clearInterval(intervalId);
+        document.getElementById('status').textContent="Status: Stopped";
+        document.getElementById('status').style.background="#333";
+        log("Bot stopped");
+    }
+</script>
+</body>
+</html>
